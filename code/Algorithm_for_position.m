@@ -1,51 +1,56 @@
 function algorithm_for_position()
-% =========================================================================
 
 % =========================================================================
 
-%% ===== User-config =====
+
+%% ===== User configuration ==================================================
 % Sampling
 fs                        = 1000;        % Hz, nominal sampling rate
-blockSec                  = 8.0;         % seconds per block
-blockSamples              = round(blockSec * fs);    % 8000
+blockSec                  = 4.0;         % seconds per block (fixed 4 s)
+blockSamples              = round(blockSec * fs);    % 4000 samples
 
 % Geometry & search
-geom.vel                  = 50000/60;    % um/s
-geom.squareSideUm         = 3000;        % 3 mm
-search.gridStepUm         = 250;         % um
+geom.vel                  = 50000/60;    % µm/s, vertical speed
+geom.squareSideUm         = 3000;        % 3 mm → 3000 µm
+search.gridStepUm         = 250;         % candidate grid step (µm)
 
 % Peak detection
-peakDet.minProm           = 5e-2;        % V
-peakDet.minPeakDistSec    = 0.2;         % s
+peakDet.minProm           = 5e-2;        % V, minimum peak prominence
+peakDet.minPeakDistSec    = 0.2;         % s, minimum peak spacing
 
-% Matching score
-score.matching_threshold  = 0.05;        % s
-score.sigma               = 0.02;        % s
+% Matching score (time-of-contact alignment)
+score.matching_threshold  = 0.05;        % s, nearest-neighbor tolerance
+score.sigma               = 0.02;        % s, soft weighting scale
 
 % Visualization
-viz.gridN                 = 200;
+viz.gridN                 = 200;         % dense surface raster for display
 viz.fontSize              = 10;
 viz.viewAzEl              = [-43 34];
-viz.barGridN              = 12;
-viz.maxBarHeightUm        = 1000;
+viz.barGridN              = 12;          % N×N bars within square footprint
+viz.maxBarHeightUm        = 1000;        % axis z-limit cap for bars (µm)
 viz.barEdgeColor          = [0.2 0.2 0.2];
 viz.barFaceAlpha          = 0.95;
 viz.forceModel            = 'hertz';     % 'hertz' | 'linear'
 viz.applyRadialProfile    = true;
 viz.radialScale           = 1.0;
 
-% Serial source (ASCII single value per line by default)
-ser.port                  = "COM5";      % <-- change to your COM port, e.g., "COM3" / "/dev/ttyUSB0"
-ser.baud                  = 115200;      % device baudrate
-ser.terminator            = "LF";        % "LF" | "CR" | "CR/LF" or a custom char (e.g., "\n")
-ser.timeoutSec            = 15;          % per block timeout (seconds)
-ser.flushOnStart          = true;        % flush stale data at start
-ser.blocksToRead          = 9999;        % number of blocks to read before stopping (you can stop manually)
-ser.pauseBetweenBlocksSec = 0.2;         % optional pause between two blocks
-ser.holdAfterPredictSec   = 0.5;         % animation duration per block
+% Position & force windowing (adaptive)
+posWindowSec_default      = 0.1;         % start with 100 ms for position
+posWindowFallbacks        = [0.2 0.3 0.5 1.0];  % fallback ladder (s)
+% Effective rule: try 0.1 s; if insufficient peaks/fit, try 0.2/0.3/0.5/1.0 s.
 
-%% ===== Load surface from base workspace =====
-% Expect table "Untitled" with VarName1/2/3 = x,y,z; units set below.
+% Serial source (ASCII, one value per line)
+ser.port                  = "COM5";      % <-- set your COM port
+ser.baud                  = 115200;      % serial baud rate
+ser.terminator            = "LF";        % "LF" | "CR" | "CR/LF"
+ser.timeoutSec            = 15;          % per-block timeout (s)
+ser.flushOnStart          = true;        % flush stale input on start
+ser.blocksToRead          = 9999;        % number of blocks to run
+ser.pauseBetweenBlocksSec = 0.2;         % optional inter-block pause (s)
+ser.holdAfterPredictSec   = 0.5;         % animation duration per block (s)
+
+
+%% ===== Load surface from base workspace ====================================
 if ~evalin('base','exist(''Untitled'',''var'')')
     error('Base workspace must contain table "Untitled" with VarName1/2/3 (x,y,z).');
 end
@@ -54,10 +59,10 @@ U = evalin('base','Untitled');
 surfaceUnits = 'mm'; % 'mm' or 'um'
 scale = strcmpi(surfaceUnits,'mm')*1000 + strcmpi(surfaceUnits,'um')*1;
 
-x = double(U.VarName1) * scale;   % um
-y = double(U.VarName2) * scale;   % um
-z = double(U.VarName3) * scale;   % um
-z = z - min(z);
+x = double(U.VarName1) * scale;   % µm
+y = double(U.VarName2) * scale;   % µm
+z = double(U.VarName3) * scale;   % µm
+z = z - min(z);                   % shift so min(z)=0
 
 x_min = min(x); x_max = max(x);
 y_min = min(y); y_max = max(y);
@@ -67,15 +72,16 @@ Fsurf = scatteredInterpolant(x, y, z, 'natural', 'linear');
 [Xg, Yg] = meshgrid(linspace(x_min,x_max,viz.gridN), linspace(y_min,y_max,viz.gridN));
 Zs = Fsurf(Xg,Yg); Zs = max(Zs,0);
 
-% Dense candidate points for time-of-contact matching
+% Dense candidate points (for grid search & display)
 peakX = Xg(:); peakY = Yg(:); peakZ = Zs(:);
 
-% Z limit for axes
+% Z axis limit (max of sensor height and bar cap)
 z_max = max(sensor_max_z, viz.maxBarHeightUm);
 
-%% ===== UI =====
+
+%% ===== UI ================================================================
 S = struct(); S.isClosing=false; S.running=false; S.mode='Single';
-S.fig = figure('Name','Bmfe Super useful algorithm (Serial Playback)', ...
+S.fig = figure('Name','Bmfe Algorithm (Serial Playback)', ...
     'Color','w','Position',[100 60 1200 750], 'IntegerHandle','off');
 
 S.txtMode = uicontrol('Style','text','Units','normalized','Position',[0.02 0.94 0.58 0.04], ...
@@ -93,23 +99,22 @@ S.btnStop  = uicontrol('Style','pushbutton','String','Stop',  'Units','normalize
 
 S.tl = tiledlayout(S.fig,1,2,'TileSpacing','loose','Padding','compact');
 
-% Left view: surface + pressed points (no plane)
+% Left panel: surface + growing pressed area
 S.ax3D = nexttile(S.tl,1);
 surf(S.ax3D,Xg,Yg,Zs,'EdgeColor','none'); hold(S.ax3D,'on');
 colormap(S.ax3D,parula); shading(S.ax3D,'interp');
-xlabel(S.ax3D,'X (um)'); ylabel(S.ax3D,'Y (um)'); zlabel(S.ax3D,'Z (um)');
+xlabel(S.ax3D,'X (µm)'); ylabel(S.ax3D,'Y (µm)'); zlabel(S.ax3D,'Z (µm)');
 axis(S.ax3D,[x_min x_max y_min y_max 0 z_max]);
 axis(S.ax3D,'equal'); axis(S.ax3D,'vis3d'); grid(S.ax3D,'on');
 set(S.ax3D,'XDir','normal','YDir','normal','ZDir','normal');
 view(S.ax3D, viz.viewAzEl);
 title(S.ax3D,'Surface + expanding pressed area (1:red, 2:magenta)');
-
 S.pressPts3D_1 = scatter3(S.ax3D,nan,nan,nan,18,'r','filled');
 S.pressPts3D_2 = scatter3(S.ax3D,nan,nan,nan,18,[1 0 1],'filled');
 
-% Right view: square + 3D bars (force)
+% Right panel: square footprint + 3D bars
 S.axPos = nexttile(S.tl,2); hold(S.axPos,'on'); grid(S.axPos,'on');
-xlabel(S.axPos,'X (um)'); ylabel(S.axPos,'Y (um)'); zlabel(S.axPos,'Force height (um)');
+xlabel(S.axPos,'X (µm)'); ylabel(S.axPos,'Y (µm)'); zlabel(S.axPos,'Force height (µm)');
 title(S.axPos,'Square (3 mm) + 3D bars (synchronized growth)');
 axis(S.axPos,[x_min x_max y_min y_max 0 z_max]);
 axis(S.axPos,'equal'); axis(S.axPos,'vis3d');
@@ -129,13 +134,14 @@ S.depthText   = text(mean([x_min x_max]), y_max, z_max, ...
 
 S.barPatches1 = []; S.barPatches2 = [];
 
-% Link cameras
+% Link camera properties across panels
 propsToLink = {'CameraPosition','CameraTarget','CameraUpVector','CameraViewAngle', ...
                'XLim','YLim','ZLim','DataAspectRatio','PlotBoxAspectRatio'};
 S.camLink = linkprop([S.ax3D, S.axPos], propsToLink);
 setappdata(S.fig,'camLink',S.camLink);
 
-%% ===== State =====
+
+%% ===== State =============================================================
 S.fs       = fs;
 S.blockSec = blockSec;
 S.blockSamples = blockSamples;
@@ -145,6 +151,12 @@ S.search   = search;
 S.peakDet  = peakDet;
 S.score    = score;
 S.viz      = viz;
+
+% Windowing state
+S.posWindowSec_default = posWindowSec_default;
+S.posWindowFallbacks   = posWindowFallbacks;
+S.posWindowUsed        = posWindowSec_default;           % actually used “position window”
+S.forceWindowSec       = max(blockSec - S.posWindowUsed, 0);  % derived “force window”
 
 S.surface  = struct('Xg',Xg,'Yg',Yg,'Zs',Zs,'x_min',x_min,'x_max',x_max, ...
                     'y_min',y_min,'y_max',y_max,'sensor_max_z',sensor_max_z, ...
@@ -160,7 +172,7 @@ S.filt.butter_order    = 4;
 
 % Serial
 S.ser = ser;
-S.serialObj = [];   % serialport object (created on Start)
+S.serialObj = [];   % serialport object
 
 % Counters and flags
 S.blockIdx = 0;
@@ -172,12 +184,12 @@ S.holdAfterPredictSec = ser.holdAfterPredictSec;
 guidata(S.fig,S);
 S.fig.CloseRequestFcn = @(h,ev) onClose(h);
 
-%% ===== Callbacks =====
+
+%% ===== Callbacks ==========================================================
     function onModeChange()
         fig = gcbf; if isempty(fig), fig = S.fig; end
         S = guidata(fig);
         if S.running
-            % prevent mode change while running
             modes = {'Single','Dual'};
             curIdx = find(strcmpi(S.mode, modes), 1); if isempty(curIdx), curIdx = 1; end
             set(S.modePopup,'Value',curIdx);
@@ -209,21 +221,19 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
             return;
         end
 
-        % Reset
+        % Reset state and UI
         S.running = true; S.isClosing=false; S.blockIdx = 0; S.last = initLast();
         guidata(fig,S); refreshRightPanels(0);
-
         set(S.btnStart,'Enable','off'); set(S.btnStop,'Enable','on'); set(S.modePopup,'Enable','off');
 
-        % Main loop: read N blocks from serial
+        % Block loop
         for kBlk = 1:S.ser.blocksToRead
             S = guidata(fig);
             if ~S.running || S.isClosing, break; end
 
-            % --- Blocking read of one full block (8000 samples) from serial ---
+            % Blocking read: 4000 samples per block
             [ok, vRaw] = readOneBlockFromSerial(S.serialObj, S.blockSamples, S.ser.timeoutSec);
             if ~ok
-                % timeout or parse error → stop gracefully
                 S.last = initLast();
                 S.last.modeTxt = sprintf('Block #%d | Serial timeout or parse error', S.blockIdx+1);
                 guidata(fig,S);
@@ -231,10 +241,10 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
                 break;
             end
 
-            % Process block
+            % Process one block
             processOneBlock(fig, vRaw(:));
 
-            % Inter-block pause (optional)
+            % Optional pause between blocks
             if S.ser.pauseBetweenBlocksSec > 0
                 t0 = tic; 
                 while toc(t0) < S.ser.pauseBetweenBlocksSec
@@ -253,7 +263,7 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
         S = guidata(fig);
         if ~isstruct(S), return; end
 
-        % Close serial if opened
+        % Tidy up serial port
         if ~isempty(S.serialObj)
             try, configureCallback(S.serialObj, "off"); catch, end
             try, flush(S.serialObj); catch, end
@@ -262,7 +272,6 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
         end
 
         S.running = false; S.isClosing = false; guidata(fig,S);
-
         set(S.btnStart,'Enable','on'); set(S.btnStop,'Enable','off'); set(S.modePopup,'Enable','on');
         set(S.txtMode,'String','Mode: stopped');
     end
@@ -272,7 +281,6 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
         S = guidata(hfig);
         if isstruct(S)
             S.isClosing = true; S.running=false; guidata(hfig,S);
-            % Close serial on close:
             if ~isempty(S.serialObj)
                 try, configureCallback(S.serialObj, "off"); catch, end
                 try, flush(S.serialObj); catch, end
@@ -283,14 +291,14 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
     end
 
     function processOneBlock(fig, vRaw)
-        % Core algorithm for a single 8-second block
+        % Core routine for a single 4-second block with adaptive position window.
         S = guidata(fig);
         if ~isstruct(S) || ~S.running || S.isClosing, return; end
 
         fs = S.fs; dt = 1/fs;
         tBlock = (0:numel(vRaw)-1)'*dt;
 
-        %% --- Preprocessing (not displayed) ---
+        %% --- Preprocessing over the entire block ---
         bw = S.filt.baseline_window; if mod(bw,2)==0, bw = bw+1; end
         baseline  = movmean(vRaw, bw);
         detrended = vRaw - baseline;
@@ -300,29 +308,41 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
         [b,a] = butter(S.filt.butter_order, Wn, 'low');
         try, vProc = filtfilt(b, a, detrended); catch, vProc = filter(b, a, detrended); end
 
-        %% --- Peak detection (for position estimation only) ---
-        vAC = vProc(:);
-        sigmaV  = 1.4826 * mad(vAC, 1);
-        minProm = max([S.peakDet.minProm, 3*sigmaV, 1e-5]);
-        minDistSamp = max(1, round(S.peakDet.minPeakDistSec * fs));
-        minWidth    = max(1, round(0.002 * fs));
-        [~, locsAC] = findpeaks(vAC, ...
-            'MinPeakProminence', minProm, ...
-            'MinPeakDistance',   minDistSamp, ...
-            'MinPeakWidth',      minWidth);
+        %% --- Adaptive position-window trials (early portion only) ---
+        try_windows = [S.posWindowSec_default, S.posWindowFallbacks];
+        try_windows = try_windows(try_windows < S.blockSec - 0.01); % leave time for force window
 
-        edgeMs = 0.02;
-        keep   = (tBlock(locsAC) > edgeMs) & (tBlock(locsAC) < S.blockSec - edgeMs);
-        locs   = locsAC(keep);
+        gotCenter = false;
+        usedWin   = S.posWindowSec_default;
+        modeLabel = 'Final (Single)';
 
-        %% --- Single / Dual position estimation ---
-        tk = sort(tBlock(locs));
-        if isempty(tk)
-            S.last = initLast();
-            S.last.modeTxt = sprintf('Block #%d | No peaks', S.blockIdx+1);
-            guidata(fig,S);
-            refreshRightPanels(0);
-        else
+        for w = try_windows
+            % Peak detection restricted to [0, w]
+            posMask = (tBlock <= w);
+            vACpos  = vProc(posMask);
+            tPos    = tBlock(posMask);
+
+            sigmaV  = 1.4826 * mad(vACpos, 1);
+            minProm = max([S.peakDet.minProm, 3*sigmaV, 1e-5]);
+            minDistSamp = max(1, round(S.peakDet.minPeakDistSec * fs));
+            minWidth    = max(1, round(0.002 * fs));
+
+            [~, locsAC] = findpeaks(vACpos, ...
+                'MinPeakProminence', minProm, ...
+                'MinPeakDistance',   minDistSamp, ...
+                'MinPeakWidth',      minWidth);
+
+            edgeMs = 0.02;
+            keep   = (tPos(locsAC) > edgeMs) & (tPos(locsAC) < w - edgeMs);
+            locs   = locsAC(keep);
+
+            tk = sort(tPos(locs));
+            if isempty(tk)
+                % No peaks found for this window; try a longer one
+                continue;
+            end
+
+            % Position solve (Single or Dual)
             if strcmpi(S.mode,'Single')
                 adj_res = tk - tk(1);
                 [center1, idx1, tpred1] = estimateSquareCenterFromPeaks( ...
@@ -330,7 +350,11 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
                     S.geom.squareSideUm, ...
                     [S.surface.x_min S.surface.x_max S.surface.y_min S.surface.y_max], ...
                     S.search.gridStepUm, S.surface.sensor_max_z, S.geom.vel, S.score);
-                S.last = buildOne(center1, idx1, tpred1, S, 'Final (Single)');
+
+                tmp = buildOne(center1, idx1, tpred1, S, 'Final (Single)');
+                if tmp.valid1
+                    S.last = tmp; modeLabel = 'Final (Single)'; gotCenter = true; usedWin = w; break;
+                end
             else
                 obs_rel_full = tk - tk(1);
                 [c1, idx1, tp1] = estimateSquareCenterFromPeaks( ...
@@ -342,7 +366,8 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
 
                 [X2,Y2,Z2,maskLocalToGlobal] = dropInsideSquare(S.peaks.X, S.peaks.Y, S.peaks.Z, c1, S.geom.squareSideUm);
                 useTimes = obs_remain; if numel(useTimes)<2, useTimes = obs_rel_full; end
-                if numel(X2)>=3
+
+                if numel(X2) >= 3
                     [c2, idx2_local, tp2] = estimateSquareCenterFromPeaks( ...
                         useTimes, X2, Y2, Z2, ...
                         S.geom.squareSideUm, ...
@@ -353,16 +378,46 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
                     c2=[nan nan]; idx2=[]; tp2=[];
                 end
                 tStart2 = 0; if ~isempty(useTimes), tStart2 = min(useTimes); end
-                S.last = buildTwo(c1, idx1, tp1, c2, idx2, tp2, tStart2, S, 'Final (Dual)');
+
+                tmp = buildTwo(c1, idx1, tp1, c2, idx2, tp2, tStart2, S, 'Final (Dual)');
+                if tmp.valid1 || (isfield(tmp,'valid2') && tmp.valid2)
+                    S.last = tmp; modeLabel = 'Final (Dual)'; gotCenter = true; usedWin = w; break;
+                end
+            end
+        end
+
+        % If still no valid solution, report and clear overlays
+        if ~gotCenter
+            S.last = initLast();
+            S.last.modeTxt = sprintf('Block #%d | No peaks/center up to %.0f ms', S.blockIdx+1, try_windows(end)*1000);
+            guidata(fig,S);
+            refreshRightPanels(0);
+        else
+            % Success: update windows and annotate
+            S.posWindowUsed   = usedWin;
+            S.forceWindowSec  = max(S.blockSec - S.posWindowUsed, 0);
+            guidata(fig,S);
+
+            if strcmpi(S.mode,'Single')
+                S.last.modeTxt = sprintf('%s | posWin=%.0f ms, forceWin=%.0f ms', ...
+                    modeLabel, usedWin*1000, S.forceWindowSec*1000);
+            else
+                if S.last.valid2
+                    S.last.modeTxt = sprintf('%s (both) | posWin=%.0f ms, forceWin=%.0f ms', ...
+                        modeLabel, usedWin*1000, S.forceWindowSec*1000);
+                else
+                    S.last.modeTxt = sprintf('%s (only #1) | posWin=%.0f ms, forceWin=%.0f ms', ...
+                        modeLabel, usedWin*1000, S.forceWindowSec*1000);
+                end
             end
             guidata(fig,S);
 
-            % Clear overlays and run synchronized animation
+            % Refresh & animate (bar growth synchronized to force window)
             refreshRightPanels(0);
             animatePressSync(fig);
         end
 
-        % Count block
+        % Advance block counter
         S.blockIdx = S.blockIdx + 1;
         guidata(fig,S);
         drawnow limitrate;
@@ -371,62 +426,42 @@ S.fig.CloseRequestFcn = @(h,ev) onClose(h);
 end % ===== end main =====
 
 
-%% ===== Serial utilities =====
+%% ===== Serial utilities ====================================================
 function [ok, vRaw] = readOneBlockFromSerial(sp, blockSamples, timeoutSec)
-% Read exactly 'blockSamples' numeric values from serial port 'sp'.
-% Default: ASCII single value per line (configured by terminator).
-% Returns ok=false on timeout or parse failure.
-
+% Blocking read of one scalar-valued block from a serialport stream.
 v = nan(blockSamples,1);
 i = 1;
-
 tStart = tic;
 while i <= blockSamples
-    % Timeout check
     if toc(tStart) > timeoutSec
-        ok = false; vRaw = [];
-        return;
+        ok = false; vRaw = []; return;
     end
-
-    % If there is data, read a line and parse it
     try
         if sp.NumBytesAvailable > 0
-            % --- ASCII single numeric per line ---
-            line = strtrim(readline(sp));    % e.g., "0.00123"
+            line = strtrim(readline(sp));
             val = str2double(line);
-            if ~isfinite(val)
-                % If parsing fails, skip (or you can fail fast)
-                continue;
-            end
-            v(i) = val;
-            i = i + 1;
-
-            % (Optional) If your device sends binary or multiple values per line,
-            % replace the above with your custom parser, e.g.:
-            %   raw = read(sp, Nbytes, 'uint8');  % binary packet
-            %   val = typecast(raw(5:8),'single'); % etc.
-            %   v(i) = double(val); i=i+1;
+            if ~isfinite(val), continue; end
+            v(i) = val; i = i + 1;
         else
-            pause(0.001); % short yield
+            pause(0.001);
         end
     catch
-        % Any serial read error → keep trying until timeout
         pause(0.001);
     end
 end
-
 ok = true; vRaw = v;
 end
 
 function clearSio(sp)
-% Safe cleanup for serialport object to release COM
+% Best-effort serial cleanup
 try, fclose(instrfind); catch, end %#ok<INSTRF>
 try, delete(sp); catch, end
 end
 
 
-%% ===== Helper structs =====
+%% ===== Helper structs ======================================================
 function L = initLast()
+% Container for the most recent solve/visualization payload
 L = struct(... 
     'valid1',false,'center1',[nan nan],'rect1',[nan nan nan nan], ...
     'pressedIdx1',[],'insideIdx1',[],'insideForce1',[], ...
@@ -439,6 +474,7 @@ L = struct(...
 end
 
 function L = buildOne(center, idxInside, tpredInside, S, modeLabel)
+% Pack single-square solution
 L = initLast();
 if isempty(idxInside) || ~all(isfinite(center))
     L.modeTxt = sprintf('%s | No valid result', modeLabel); return;
@@ -464,6 +500,7 @@ L.modeTxt  = sprintf('%s', modeLabel);
 end
 
 function L = buildTwo(c1, idx1, tp1, c2, idx2, tp2, tStart2, S, modeLabel)
+% Pack dual-square solution
 L = buildOne(c1, idx1, tp1, S, [modeLabel ' #1']);
 if isempty(idx2) || ~all(isfinite(c2))
     L.modeTxt = sprintf('%s (only #1 valid)', modeLabel);
@@ -489,8 +526,10 @@ L.tStart2  = tStart2;
 end
 
 
-%% ===== Solvers & Utils =====
+%% ===== Solvers & utilities ===============================================
 function [center, idxInside, tpredInside] = estimateSquareCenterFromPeaks(adj_res_times, X, Y, Z, L, bounds, stepUm, sensor_max_z, vel, score)
+% Grid-search center of an L×L square by matching predicted vs observed
+% relative contact times (nearest-neighbor matching with soft weights).
 center = [nan nan]; idxInside = []; tpredInside = [];
 if isempty(adj_res_times) || isempty(X), return; end
 
@@ -500,7 +539,7 @@ y_min = bounds(3)+L/2; y_max = bounds(4)-L/2;
 if x_min>=x_max || y_min>=y_max, return; end
 
 xcand = x_min:stepUm:x_max;
-ycand = y_min:stepUm:y_max;
+ycand = y_min:stepUm:ymax;
 
 bestScore = -inf; bestCenter = [nan nan]; bestIdx = []; bestTP = [];
 
@@ -534,6 +573,7 @@ tpredInside  = bestTP;
 end
 
 function obs_remain = greedyRemoveMatched(obs_times, pred_times, thr)
+% Greedily remove observed times that match predicted times within thr.
 obs = sort(obs_times(:));
 if isempty(obs) || isempty(pred_times), obs_remain = obs; return; end
 used = false(size(obs));
@@ -548,6 +588,7 @@ obs_remain = obs(~used);
 end
 
 function [X2,Y2,Z2,maskLocalToGlobal] = dropInsideSquare(X,Y,Z, center, L)
+% Remove points inside the first square to search for a second square.
 if any(~isfinite(center))
     X2=X;Y2=Y;Z2=Z; maskLocalToGlobal = true(size(X));
     return;
@@ -559,6 +600,7 @@ maskLocalToGlobal = keep;
 end
 
 function idxGlobal = localToGlobalIndex(idxLocal, X2, Y2, Z2, Xall, Yall, Zall, maskLocalToGlobal)
+% Map indices in the reduced (outer) set back to the full set.
 if isempty(idxLocal), idxGlobal = []; return; end
 tol = 1e-9;
 idxGlobal = zeros(size(idxLocal));
@@ -576,6 +618,7 @@ end
 end
 
 function hidePatches(patches)
+% Hide a group of patch handles (if any exist).
 if isempty(patches), return; end
 for k=1:numel(patches)
     if isgraphics(patches(k)), set(patches(k),'Visible','off'); end
@@ -583,6 +626,7 @@ end
 end
 
 function patches = drawOrUpdateBars(ax, patches, Xc, Yc, F, dx, dy, hmax, vz, cmapArr)
+% Create or update the 3D bar field over the square.
 N = numel(F);
 if isempty(patches) || numel(patches) ~= N*5 || any(~isgraphics(patches))
     if ~isempty(patches)
@@ -611,6 +655,7 @@ end
 end
 
 function [Vtops,V1,V2,V3,V4,fc] = barVerticesColors(i,Xc,Yc,F,dx,dy,hmax,cmapArr)
+% Compute vertices and face color for a single bar cell.
 x0 = Xc(i)-dx/2; x1 = Xc(i)+dx/2;
 y0 = Yc(i)-dy/2; y1 = Yc(i)+dy/2;
 f  = max(0,min(1,F(i)));
@@ -624,14 +669,17 @@ V3 = [x1 y1 0;  x0 y1 0;  x0 y1 h;  x1 y1 h];
 V4 = [x0 y1 0;  x0 y0 0;  x0 y0 h;  x0 y1 h];
 end
 
-%% ===== Force field =====
+
+%% ===== Force field (normalized) ===========================================
 function [Xc, Yc, Fn, dx, dy] = computeBarForces(center, S, startOffsetSec)
+% Compute normalized force field over the square footprint.
 half = S.geom.squareSideUm/2; cx = center(1); cy = center(2);
 N  = S.viz.barGridN; dx = S.geom.squareSideUm / N; dy = S.geom.squareSideUm / N;
 [Xc, Yc] = meshgrid( (cx-half)+dx/2:dx:(cx+half)-dx/2, ...
                      (cy-half)+dy/2:dy:(cy+half)-dy/2 );
 Xc = Xc(:); Yc = Yc(:);
 
+% Surface height at bar centers (robust fallback)
 Zc = S.surface.Fsurf(Xc, Yc);
 bad = ~isfinite(Zc);
 if any(bad)
@@ -639,13 +687,18 @@ if any(bad)
     Zc(~isfinite(Zc)) = median(S.surface.Zs(:),'omitnan');
 end
 
+% Predicted relative arrival (lower regions touch earlier)
 t_pred_abs = (S.surface.sensor_max_z - Zc) / S.geom.vel;
 t_rel = t_pred_abs - min(t_pred_abs);
 offset = max(0, startOffsetSec);
-ageSec = S.blockSec;
 
+% Force growth window = blockSec − actual position window
+ageSec = S.forceWindowSec;
+
+% Penetration depth proxy (µm)
 depth_um = S.geom.vel * max(0, ageSec - (t_rel + offset));
 
+% Force law
 switch lower(S.viz.forceModel)
     case 'hertz'
         Fn = depth_um .^ 1.5;
@@ -653,6 +706,7 @@ switch lower(S.viz.forceModel)
         Fn = depth_um;
 end
 
+% Optional radial taper
 if isfield(S.viz,'applyRadialProfile') && S.viz.applyRadialProfile
     R = (S.geom.squareSideUm/2) * max(0.1, S.viz.radialScale);
     r = hypot(Xc-cx, Yc-cy);
@@ -661,27 +715,32 @@ if isfield(S.viz,'applyRadialProfile') && S.viz.applyRadialProfile
     Fn = Fn .* w;
 end
 
+% Normalize to [0, 1]
 mx = max(Fn);
 if ~isfinite(mx) || mx<=0, Fn(:)=0; else, Fn = max(0, min(1, Fn./mx)); end
 end
 
-%% ===== Right panel refresh =====
+
+%% ===== Right panel refresh (scale drives bar growth) ======================
 function refreshRightPanels(scale)
 if nargin<1, scale = 1; end
 S = guidata(gcf);
 
+% Clear left-panel pressed points (animation controls these)
 set(S.pressPts3D_1,'XData',nan,'YData',nan,'ZData',nan);
 set(S.pressPts3D_2,'XData',nan,'YData',nan,'ZData',nan);
 
+% Hide/clear squares & centers
 set(S.rectH1,'Visible','off'); set(S.rectH2,'Visible','off');
 set(S.centerH1,'XData',nan,'YData',nan,'ZData',nan);
 set(S.centerH2,'XData',nan,'YData',nan,'ZData',nan);
 
+% Square #1
 if S.last.valid1 && all(isfinite(S.last.rect1))
     set(S.rectH1,'Position',S.last.rect1,'Visible','on');
     set(S.centerH1,'XData',S.last.center1(1),'YData',S.last.center1(2),'ZData',0);
 
-    Fn1 = S.last.Fn1 .* max(0,min(1,scale));
+    Fn1 = S.last.Fn1 .* max(0,min(1,scale)); % synchronized bar growth
     S.barPatches1 = drawOrUpdateBars(S.axPos, S.barPatches1, ...
         S.last.Xc1, S.last.Yc1, Fn1, S.last.dx, S.last.dy, ...
         S.viz.maxBarHeightUm, S.viz, hot(256));
@@ -689,6 +748,7 @@ else
     hidePatches(S.barPatches1);
 end
 
+% Square #2 (dual mode)
 if isfield(S.last,'valid2') && S.last.valid2 && all(isfinite(S.last.rect2))
     set(S.rectH2,'Position',S.last.rect2,'Visible','on');
     set(S.centerH2,'XData',S.last.center2(1),'YData',S.last.center2(2),'ZData',0);
@@ -701,6 +761,7 @@ else
     hidePatches(S.barPatches2);
 end
 
+% Status text
 if isfield(S.last,'modeTxt')
     S.depthText.String = S.last.modeTxt;
 else
@@ -710,7 +771,8 @@ end
 guidata(S.fig,S);
 end
 
-%% ===== Animation (synchronized) =====
+
+%% ===== Synchronized animation ============================================
 function animatePressSync(fig)
 S = guidata(fig);
 if ~isstruct(S) || ~S.running || S.isClosing, return; end
@@ -726,6 +788,7 @@ fps   = 30;
 steps = max(ceil(dur*fps),1);
 dt    = dur/steps;
 
+% Normalize by max predicted arrival times to drive left-panel growth
 tmax1 = 0; tmax2 = 0;
 if S.last.valid1 && ~isempty(S.last.tInside1), tmax1 = max(S.last.tInside1); end
 if isfield(S.last,'valid2') && S.last.valid2 && ~isempty(S.last.tInside2), tmax2 = max(S.last.tInside2); end
@@ -736,8 +799,10 @@ for k = 0:steps
     if ~S.running || S.isClosing, return; end
     progress = k/steps;
 
+    % Right panel: bar growth
     refreshRightPanels(progress);
 
+    % Left panel: pressed points expand according to predicted relative times
     if S.last.valid1 && ~isempty(S.last.insideIdx1) && ~isempty(S.last.tInside1)
         sel1 = (S.last.tInside1./tmax1) <= progress + eps;
         idx1 = S.last.insideIdx1(sel1);
@@ -760,13 +825,15 @@ end
 resetVisualizationToBaseline(fig);
 end
 
-%% ===== Reset overlays =====
+
+%% ===== Reset overlays to baseline ========================================
 function resetVisualizationToBaseline(fig)
 S = guidata(fig);
 if ~isstruct(S), return; end
 
 S.last = initLast();
 
+% Left-panel pressed points → cleared (surface remains)
 if isgraphics(S.pressPts3D_1)
     set(S.pressPts3D_1,'XData',nan,'YData',nan,'ZData',nan,'Visible','on');
 end
@@ -774,6 +841,7 @@ if isgraphics(S.pressPts3D_2)
     set(S.pressPts3D_2,'XData',nan,'YData',nan,'ZData',nan,'Visible','on');
 end
 
+% Right-panel overlays → hidden/cleared
 if isgraphics(S.rectH1),   set(S.rectH1,'Visible','off'); end
 if isgraphics(S.rectH2),   set(S.rectH2,'Visible','off'); end
 if isgraphics(S.centerH1), set(S.centerH1,'XData',nan,'YData',nan,'ZData',nan); end
