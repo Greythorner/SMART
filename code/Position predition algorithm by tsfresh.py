@@ -35,7 +35,7 @@ from sklearn.linear_model import LogisticRegression
 @dataclass(frozen=True)
 class Config:
     # I/O
-    input_excel: str = r"C:/Users/wuqiushuo/Desktop/数据汇总20240708.xlsx"
+    input_excel: str = r"C:/Users/wuqiushuo/Desktop/Position predition algorithm Data.xlsx"
     id_col: str = "id"
 
     # Schema
